@@ -32,7 +32,7 @@ An intelligent HR assistant bot for Microsoft Teams that uses semantic search to
 3. AI response with source citations
 4. Follow-up question being answered
 Blur any company-specific information -->
-*Employee asking about vacation policy receives instant, accurate response with handbook references*
+*Employee asking about equipment failure receives instant, accurate response with handbook references*
 
 ---
 
