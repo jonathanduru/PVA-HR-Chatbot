@@ -1,0 +1,297 @@
+{
+  "name": "HR Chat Backend",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "hr-chat-backend",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook_trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "hr-chat-backend"
+    },
+    {
+      "parameters": {
+        "functionCode": "const providedPassword = $input.all()[0].headers['authorization'];\nconst expectedPassword = $env['HR_CHAT_PASSWORD'];\n\nif (!providedPassword || providedPassword !== expectedPassword) {\n  throw new Error('Unauthorized: Invalid or missing password');\n}\n\nreturn $input.all();"
+      },
+      "id": "validate_password",
+      "name": "Validate Password",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "text-embedding-ada-002"
+            },
+            {
+              "name": "input",
+              "value": "={{ $json.body.question }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "generate_embedding",
+      "name": "Generate Question Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [650, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai_api",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT chunk_text, source_file, section_title, chunk_index, metadata,\n       1 - cosine_distance(embedding, $1::vector) as similarity\nFROM document_chunks\nWHERE embedding IS NOT NULL\nORDER BY cosine_distance(embedding, $1::vector)\nLIMIT 3",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.data[0].embedding]) }}"
+        }
+      },
+      "id": "search_chunks",
+      "name": "Search Similar Chunks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "credentials": {
+        "postgres": {
+          "id": "railway_pgvector",
+          "name": "Railway PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst question = items[0].json.body.question;\nconst userName = items[0].json.body.userName;\nconst department = items[0].json.body.department;\nconst chunks = items[0].json;\n\nif (!chunks || chunks.length === 0) {\n  return [{\n    json: {\n      question,\n      context: 'No relevant information found in the employee handbook.',\n      sources: [],\n      userName,\n      department\n    }\n  }];\n}\n\nconst context = chunks.map((chunk, index) => {\n  const relevance = Math.round(chunk.similarity * 100);\n  return `[Source ${index + 1} - ${relevance}% relevant]\nSection: ${chunk.section_title}\nFile: ${chunk.source_file}\nContent: ${chunk.chunk_text}`;\n}).join('\\n\\n');\n\nreturn [{\n  json: {\n    question,\n    context,\n    sources: chunks,\n    userName,\n    department\n  }\n}];"
+      },
+      "id": "prepare_context",
+      "name": "Prepare Context",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const systemPrompt = 'You are an HR assistant for our company. Answer questions using ONLY the provided handbook information. If the information is not in the provided context, say so clearly. Be helpful, professional, and concise.';\n\nconst userMessage = `Question: ${$json.question}\n\nRelevant handbook sections:\n${$json.context}\n\nPlease answer the question based only on the information provided above.`;\n\nreturn [{\n  json: {\n    messages: [\n      { role: 'system', content: systemPrompt },\n      { role: 'user', content: userMessage }\n    ],\n    metadata: {\n      userName: $json.userName,\n      department: $json.department,\n      sources: $json.sources\n    }\n  }\n}];"
+      },
+      "id": "format_messages",
+      "name": "Code",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "return [{\n  json: {\n    model: 'gpt-3.5-turbo',\n    messages: $json.messages,\n    temperature: 0.3,\n    max_tokens: 500,\n    metadata: $json.metadata\n  }\n}];"
+      },
+      "id": "build_request",
+      "name": "Code1",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "={{ $json.model }}"
+            },
+            {
+              "name": "messages",
+              "value": "={{ $json.messages }}"
+            },
+            {
+              "name": "temperature",
+              "value": "={{ $json.temperature }}"
+            },
+            {
+              "name": "max_tokens",
+              "value": "={{ $json.max_tokens }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "generate_answer",
+      "name": "Generate Answer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1650, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai_api",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const answer = $json.choices[0].message.content;\nconst tokensUsed = $json.usage.total_tokens;\nconst metadata = $input.all()[0].json.metadata;\n\nconst sources = metadata.sources.map(source => ({\n  section_title: source.section_title,\n  source_file: source.source_file,\n  relevance: source.similarity\n}));\n\nreturn [{\n  json: {\n    success: true,\n    question: $node['Webhook'].json.body.question,\n    answer: answer,\n    sources: sources,\n    metadata: {\n      userName: metadata.userName,\n      department: metadata.department,\n      model: 'gpt-3.5-turbo',\n      tokensUsed: tokensUsed,\n      timestamp: new Date().toISOString()\n    }\n  }\n}];"
+      },
+      "id": "format_response",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1850, 300],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "respond_json",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2050, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Password",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Password": {
+      "main": [
+        [
+          {
+            "node": "Generate Question Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Question Embedding": {
+      "main": [
+        [
+          {
+            "node": "Search Similar Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Similar Chunks": {
+      "main": [
+        [
+          {
+            "node": "Prepare Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Context": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Code1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code1": {
+      "main": [
+        [
+          {
+            "node": "Generate Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Answer": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "id": "hr-chat-backend-workflow"
+}
